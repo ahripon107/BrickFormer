@@ -35,6 +35,7 @@ pip install "brickformer[fla]"         # fast Gated DeltaNet kernels (flash-line
 pip install "brickformer[mamba]"       # fast Mamba2 kernels (mamba-ssm; compiles against your torch/CUDA,
                                        # and this backend is not yet tested, see Limitations)
 pip install "brickformer[yaml,hf]"     # YAML configs, HF Llama import
+pip install "brickformer[train]"       # config-driven training (HF Trainer + datasets)
 ```
 
 The example configs, the training script and the tests are in the
@@ -110,7 +111,8 @@ model = from_hf_llama('meta-llama/Llama-3.2-1B')       # needs transformers; log
 
 Example configs in `configs/`: `llama_like.py`, `gdn_hybrid.py` (3:1 GDN/attention),
 `jamba_like.py` (Mamba2 + attention + MoE), `moe.py` (MLA + shared-expert MoE) and
-`swa_hybrid.yaml` (5:1 local/global attention, sandwich norm).
+`swa_hybrid.yaml` (5:1 local/global attention, sandwich norm). Full experiment configs
+(model + data + training) are in `configs/train/`.
 
 ```
 $ python -c "import brickformer as bf; print(bf.summary(bf.build_from_file('configs/moe.py'), 4096))"
@@ -125,16 +127,107 @@ total          12   487,337,984                    0.4343   (seq_len=4096, forwa
 FLOPs are forward estimates: 2 × active linear parameters per token, plus attention-score and
 recurrent-state terms. Multiply by about 3 for a training step.
 
-## Training example
+## Training from config
+
+One experiment file describes the objective, model, tokenizer, data and training run. The HF
+`Trainer` runs it (install `brickformer[train]`):
+
+```python
+objective = 'pretrain'                      # 'sft' | dict(type='dpo', ...) | dict(type='grpo', ...)
+model = dict(type='CausalLM', vocab_size='auto', dim=512, pattern='GGG*', num_layers=8, ...)
+tokenizer = dict(type='HFTokenizer', name='gpt2')                  # or dict(type='ByteTokenizer')
+data = dict(
+    train=dict(path='roneneldan/TinyStories', split='train', seq_len=512,
+               streaming=True, shuffle_buffer=10_000),
+    val=dict(path='roneneldan/TinyStories', split='validation', seq_len=512, max_samples=2_000),
+)
+train = dict(type='HFTrainer', output_dir='runs/tinystories_gdn', max_steps=3_000,
+             per_device_train_batch_size=16, gradient_accumulation_steps=2, learning_rate=1e-3,
+             lr_scheduler_type='cosine', warmup_steps=200, bf16=True, eval_steps=500, save_steps=1_000)
+```
 
 ```bash
-python examples/train_tiny.py                       # char-level tiny-shakespeare, GGG* hybrid
+brickformer-train configs/train/tinystories_gdn.py
+brickformer-train configs/train/tinystories_gdn.py --cfg-options train.learning_rate=3e-4 model.dim=768
+brickformer-train configs/train/tinystories_gdn.py --dry-run     # print resolved config + param/FLOP summary
+brickformer-train configs/train/tinystories_gdn.py --resume      # continue from the latest checkpoint
+```
+
+### Objectives
+
+The `objective` decides how the data is loaded and formatted, how batches are collated, and the
+loss. Each data entry defaults to the objective's dataset type, so you usually omit `type`; a
+dataset type built for another objective is rejected.
+
+| `objective` | Dataset type (default) | Data it reads | Loss |
+|---|---|---|---|
+| `'pretrain'` | `PretrainDataset` | a text column | next-token loss on packed `seq_len` blocks |
+| `'sft'` | `SFTDataset` | chat `messages`, or prompt + completion | next-token loss on response tokens only |
+| `dict(type='dpo', beta=0.1)` | `PreferenceDataset` | prompt, chosen, rejected | DPO against a frozen reference model |
+| `dict(type='grpo', rewards=[...])` | `PromptDataset` | prompts, plus columns for the rewards | GRPO on completions sampled during training |
+
+- **Prompts:** `prompt_template='Question: {question}\nAnswer: '` builds a prompt from any columns
+  of a row. Otherwise `prompt_field` and `completion_field` name the columns.
+- **Chat data:** message lists (`[{'role': ..., 'content': ...}]`) are rendered with the
+  tokenizer's chat template, or a ChatML-style one if it has none, such as GPT-2. Multi-turn SFT
+  trains on every assistant turn. DPO accepts the common TRL dataset layouts, for example
+  `trl-lib/ultrafeedback_binarized`. Every response ends with EOS, so the model learns to stop.
+- **DPO:** `loss_type='sigmoid'` or `'ipo'`, plus `label_smoothing`. The reference model is a
+  frozen copy of the starting policy, or another checkpoint via `ref_model='path'`. Logs
+  `rewards/chosen`, `rewards/rejected`, `rewards/accuracy` and `rewards/margin`.
+- **GRPO:** for each prompt it samples `num_generations` completions with BrickFormer's
+  `generate()` and scores them with the weighted `rewards`. Built-in rewards are `NumberMatch`
+  (GSM8K-style final answers), `ExactMatch`, `RegexMatch`, `LengthPenalty`, and `PythonReward`
+  (`fn='pkg.module:function'`). Advantages are normalized within each group (`scale_rewards=False`
+  gives Dr. GRPO). `beta > 0` adds a KL penalty to a frozen reference model. Logs `reward`,
+  `reward_std`, `frac_reward_zero_std`, each reward, `completion_length` and `frac_truncated`.
+  `per_device_train_batch_size` counts prompts.
+- **Chaining stages:** `init_from='runs/sft'` starts from a checkpoint. The model and tokenizer
+  come from that checkpoint unless you override them, so stages chain:
+  `tinystories_gdn.py` → `gsm8k_sft.py` → `gsm8k_grpo.py` or `ultrafeedback_dpo.py`, all in
+  `configs/train/`.
+
+### More details
+
+- **`model.vocab_size='auto'`:** uses the tokenizer's vocabulary rounded up to a multiple of 64
+  (GPT-2: 50257 → 50304), for faster matmuls.
+- **Pretraining data:** each document gets an EOS token, then documents are packed into full
+  `seq_len` blocks, so no compute goes to padding (`packing=False` truncates and pads instead).
+  `streaming=True` tokenizes on the fly and needs `max_steps`. All dataset types read Hub datasets
+  and local files (`path='json'`, `'parquet'` or `'text'` with `data_files=...`).
+- **`train`:** takes any `transformers.TrainingArguments` field. Evaluation always runs the
+  objective's loss, never gathers vocab-sized logits, and also reports the objective's metrics
+  with an `eval_` prefix. No external logger is used unless you set `report_to`.
+- **Checkpoints:** saved in BrickFormer format with the resolved `experiment.json` and the
+  tokenizer. Any checkpoint loads with `bf.load_pretrained(dir)`, and
+  `brickformer-train dir/experiment.json` reruns the experiment.
+- **MoE:** the aux loss is part of the training loss and is also logged separately as `aux_loss`.
+
+`train` picks its backend by `type`, so you can add another (a custom loop, or torchtitan for
+FSDP2) by registering it in `bf.RUNNERS`.
+
+On an RTX 5070 Ti, `configs/train/tinystories_gdn.py` (52.6M params) trains at about 51k tok/s
+on streamed data. Val loss reaches 2.52 after 400 steps (about 2 minutes), and the model already
+writes coherent TinyStories text. Continuing from that checkpoint with `gsm8k_sft.py` for 300
+steps (21 s) lowers the GSM8K answer-token eval loss from 3.33 to 2.99. Then `gsm8k_grpo.py` runs
+at about 3 s per step for 32 sampled completions; the model uses the `####` answer format 70–80% of
+the time, but a 52M-param story model almost never gets the number right.
+`ultrafeedback_dpo.py` also runs from the SFT checkpoint. On real tasks these are integration
+checks, not quality results.
+
+### Minimal training script
+
+`examples/train_tiny.py` is a dependency-free loop, about 150 lines, on character-level
+tiny-shakespeare:
+
+```bash
+python examples/train_tiny.py                       # GGG* hybrid
 python examples/train_tiny.py --pattern "MM*"       # Mamba2 + attention
 python examples/train_tiny.py --config configs/moe.py --dim 256 --layers 8
 ```
 
-On an RTX 5070 Ti, the default 3.2M-parameter GDN hybrid runs at about 355k tok/s with bf16
-autocast. Val loss reaches about 1.51 at step 400 and then starts to overfit.
+The default 3.2M-parameter GDN hybrid runs at about 355k tok/s with bf16 autocast. Val loss
+reaches about 1.51 at step 400 and then starts to overfit.
 
 ## Tests
 
@@ -154,6 +247,16 @@ pytest -q
   to an identical architecture; `save_pretrained`/`load_pretrained` reproduce the logits.
 - Also covered: residual styles, left-padding masks, gradient checkpointing, and MoE routing
   (top-k = E equals the dense mixture).
+- **Objectives (offline):** chat rendering and masking (multi-turn, the common prompt/response
+  layouts, rejection of chat templates whose renderings aren't prefixes of each other), each
+  objective's dataset type and how mismatches are rejected, SFT loss on response tokens only, the
+  reward functions, an SFT → DPO chain via `init_from`, and GRPO. DPO starts at exactly log 2 and
+  reaches 100% preference accuracy; GRPO raises a toy reward.
+- **Training (offline, byte tokenizer + local text):** packing and collation, streaming versus
+  map-style data, `vocab_size='auto'`, `--cfg-options` overrides, and an end-to-end HF Trainer
+  run with eval, MoE aux-loss logging and checkpoints (tied embeddings included). Checkpoints
+  reload to identical logits, a resumed run continues from step 3 rather than restarting, bf16
+  with gradient accumulation works (CUDA), and the CLI runs both `--dry-run` and real training.
 
 ## Limitations (v0.1)
 

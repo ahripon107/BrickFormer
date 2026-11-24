@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -46,6 +47,13 @@ def expand_pattern(pattern: str | list[str], block_types: dict, num_layers: int 
     return names
 
 
+class ModelConfig(dict):
+    """The model's build config: a plain ``dict`` of ``build_model`` arguments.
+
+    Attributes set on it (e.g. the HF Trainer's ``model.config.use_cache = ...``) are stored on the
+    object, not as dict keys, so they never leak into dumped / saved configs."""
+
+
 @dataclass
 class ModelCache:
     """Per-layer mixer states plus the number of tokens processed so far."""
@@ -54,13 +62,26 @@ class ModelCache:
     seq_len: int = 0
 
 
-@dataclass
-class CausalLMOutput:
-    logits: torch.Tensor
-    loss: torch.Tensor | None = None
-    aux_loss: torch.Tensor | None = None
-    cache: ModelCache | None = None
-    extras: dict = field(default_factory=dict)
+class CausalLMOutput(dict):
+    """Model output with attribute access (``out.logits``) that is also a ``dict`` with only the
+    non-``None`` fields as keys, so the HF Trainer can read ``outputs["loss"]``."""
+
+    _FIELDS = ("loss", "logits", "aux_loss", "cache")
+
+    def __init__(self, logits: torch.Tensor | Mapping | None = None, loss: torch.Tensor | None = None,
+                 aux_loss: torch.Tensor | None = None, cache: ModelCache | None = None):
+        super().__init__()
+        if isinstance(logits, Mapping):  # rebuilt from a mapping, e.g. accelerate's convert_to_fp32
+            self.update({k: v for k, v in logits.items() if v is not None})
+            return
+        for k, v in (("loss", loss), ("logits", logits), ("aux_loss", aux_loss), ("cache", cache)):
+            if v is not None:
+                self[k] = v
+
+    def __getattr__(self, name: str):
+        if name in self._FIELDS:
+            return self.get(name)
+        raise AttributeError(name)
 
 
 @MODELS.register_module()
@@ -76,11 +97,11 @@ class CausalLM(nn.Module):
                  norm: dict | None = None, residual: str = "pre_norm", final_norm: bool = True,
                  tie_embeddings: bool = False, init_std: float = 0.02, grad_checkpointing: bool = False):
         super().__init__()
-        self.config = copy.deepcopy(dict(
+        self.config = ModelConfig(copy.deepcopy(dict(
             type="CausalLM", vocab_size=vocab_size, dim=dim, pattern=pattern, block_types=block_types,
             num_layers=num_layers, pattern_chars=pattern_chars, norm=norm, residual=residual,
             final_norm=final_norm, tie_embeddings=tie_embeddings, init_std=init_std,
-            grad_checkpointing=grad_checkpointing))
+            grad_checkpointing=grad_checkpointing)))
         norm = norm or dict(type="RMSNorm")
         self.vocab_size, self.dim, self.init_std = vocab_size, dim, init_std
         self.grad_checkpointing = grad_checkpointing
@@ -142,8 +163,10 @@ class CausalLM(nn.Module):
             aux = torch.stack(losses).sum() if losses else None
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits[:, :-1].reshape(-1, logits.shape[-1]).float(),
-                                   labels[:, 1:].reshape(-1), ignore_index=-100)
+            # shift the labels rather than slicing the logits: avoids copying the [B, T, V] tensor
+            targets = F.pad(labels[:, 1:], (0, 1), value=-100)
+            loss = F.cross_entropy(logits.float().view(-1, logits.shape[-1]), targets.reshape(-1),
+                                   ignore_index=-100)
             if aux is not None and self.training:
                 loss = loss + aux
         return CausalLMOutput(logits=logits, loss=loss, aux_loss=aux, cache=cache)

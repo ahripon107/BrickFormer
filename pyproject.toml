@@ -33,7 +33,11 @@ fla = ["flash-linear-attention"]
 mamba = ["mamba-ssm", "causal-conv1d"]
 hf = ["transformers>=4.40"]
 yaml = ["pyyaml"]
-dev = ["pytest", "ruff", "pyyaml", "transformers>=4.40"]
+train = ["transformers>=4.46", "accelerate>=1.0", "datasets>=3.0", "pyyaml"]
+dev = ["pytest", "ruff", "pyyaml", "transformers>=4.46", "accelerate>=1.0", "datasets>=3.0"]
+
+[project.scripts]
+brickformer-train = "brickformer.train.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["brickformer*"]

@@ -58,6 +58,11 @@ NORMS = Registry("norms")
 POS_EMBEDS = Registry("pos_embeds")
 BLOCKS = Registry("blocks")
 MODELS = Registry("models")
+TOKENIZERS = Registry("tokenizers")
+DATASETS = Registry("datasets")
+RUNNERS = Registry("runners")
+OBJECTIVES = Registry("objectives")
+REWARDS = Registry("rewards")
 
 
 def build_model(cfg: dict) -> Any:
