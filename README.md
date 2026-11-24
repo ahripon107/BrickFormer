@@ -30,11 +30,16 @@ The model is a plain `nn.Module`, so FSDP2, torchtitan, Lightning and `torch.com
 ## Install
 
 ```bash
-pip install -e .                 # core: torch + einops only
-pip install -e ".[fla]"          # fast Gated DeltaNet kernels (flash-linear-attention)
-pip install -e ".[mamba]"        # fast Mamba2 kernels (mamba-ssm, needs a CUDA build)
-pip install -e ".[dev]"          # pytest, ruff, pyyaml, transformers
+pip install brickformer                # core: torch + einops only
+pip install "brickformer[fla]"         # fast Gated DeltaNet kernels (flash-linear-attention)
+pip install "brickformer[mamba]"       # fast Mamba2 kernels (mamba-ssm; compiles against your torch/CUDA,
+                                       # and this backend is not yet tested, see Limitations)
+pip install "brickformer[yaml,hf]"     # YAML configs, HF Llama import
 ```
+
+The example configs, the training script and the tests are in the
+[GitHub repo](https://github.com/ahripon107/BrickFormer), not in the pip package. To use them, or
+to develop, clone the repo and run `pip install -e ".[dev]"`.
 
 ## Components
 
@@ -158,3 +163,7 @@ pytest -q
 - MLA decompresses the latent cache at every step; there is no absorbed-matmul path.
 - The `mamba_ssm` backend is wired up but untested in this repo, because it could not be built
   against torch 2.11 here. The pure-PyTorch Mamba2 path is fully tested.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

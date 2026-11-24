@@ -8,7 +8,7 @@ from .models import CausalLM, CausalLMOutput, ModelCache
 from .registry import BLOCKS, FFNS, MIXERS, MODELS, NORMS, POS_EMBEDS, Registry, build_model
 from .utils import count_params, estimate_flops, summary
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "Registry", "MIXERS", "FFNS", "NORMS", "POS_EMBEDS", "BLOCKS", "MODELS", "build_model",
