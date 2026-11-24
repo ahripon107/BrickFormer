@@ -1,0 +1,19 @@
+# Gemma-2/3-style local/global interleave as a YAML config with a compact pattern string.
+# W = sliding-window attention, * = global attention (see DEFAULT_PATTERN_CHARS).
+model:
+  type: CausalLM
+  vocab_size: 32000
+  dim: 768
+  pattern: "WWWWW*"
+  num_layers: 12
+  block_types:
+    swa:
+      mixer: {type: SlidingWindowAttention, heads: 12, kv_heads: 4, window: 1024, qk_norm: true}
+      ffn: {type: SwiGLU, hidden: 2048}
+    attn:
+      mixer: {type: GQAttention, heads: 12, kv_heads: 4, qk_norm: true,
+              rope: {type: RoPE, theta: 1000000.0}}
+      ffn: {type: SwiGLU, hidden: 2048}
+  norm: {type: RMSNorm}
+  residual: sandwich
+  tie_embeddings: true

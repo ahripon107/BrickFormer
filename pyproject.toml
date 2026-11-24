@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brickformer"
+version = "0.1.0.dev0"
+description = "Config-driven library for building LLMs from mixed block types (attention, MLA, Mamba2, Gated DeltaNet, MoE)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["torch>=2.1", "einops>=0.7"]
+
+[project.optional-dependencies]
+fla = ["flash-linear-attention"]
+mamba = ["mamba-ssm", "causal-conv1d"]
+hf = ["transformers>=4.40"]
+yaml = ["pyyaml"]
+dev = ["pytest", "ruff", "pyyaml", "transformers>=4.40"]
+
+[tool.setuptools.packages.find]
+include = ["brickformer*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E741", "B905"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["cuda: needs a CUDA device"]
