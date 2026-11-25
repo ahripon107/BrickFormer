@@ -34,7 +34,7 @@ pip install brickformer                # core: torch + einops only
 pip install "brickformer[fla]"         # fast Gated DeltaNet kernels (flash-linear-attention)
 pip install "brickformer[mamba]"       # fast Mamba2 kernels (mamba-ssm; compiles against your torch/CUDA,
                                        # and this backend is not yet tested, see Limitations)
-pip install "brickformer[yaml,hf]"     # YAML configs, HF Llama import
+pip install "brickformer[yaml,hf]"     # YAML configs, HF Llama / Mistral / Qwen import
 pip install "brickformer[train]"       # config-driven training (HF Trainer + datasets)
 ```
 
@@ -105,9 +105,28 @@ model = bf.build_from_file('configs/jamba_like.py')   # .py (mmdet style), .yaml
 bf.dump_config(model.config, 'arch.yaml')              # round-trips exactly
 bf.save_pretrained(model, 'ckpt/'); model = bf.load_pretrained('ckpt/')
 
-from brickformer.hf import from_hf_llama
-model = from_hf_llama('meta-llama/Llama-3.2-1B')       # needs transformers; logits match HF
+from brickformer.hf import from_hf, load_hf_weights
+model = from_hf('Qwen/Qwen3-0.6B')                     # Llama / Mistral / Qwen2 / Qwen3; logits match HF
+model = load_hf_weights(bf.build_from_file('my_qwen3.py'), 'Qwen/Qwen3-0.6B')  # your config, checked first
+print(bf.architecture_diff(my_cfg, other_cfg))         # what differs between two configs or models
 ```
+
+`load_hf_weights` loads a checkpoint into a model built from your own config only if the config
+describes exactly the checkpoint's architecture: module types, heads, `head_dim`, QK-norm, biases,
+RoPE theta and scaling, norm eps, sliding windows, tying and every parameter shape. Otherwise it
+raises `ArchitectureMismatch` and lists each difference, grouped across layers:
+
+```
+model config does not match the architecture of 'Qwen/Qwen3-0.6B' (8 differences):
+  blocks.[0-27].mixer.head_dim: config=64, pretrained=128
+  blocks.[0-27].mixer.q_proj.weight: parameter shape config=[1024, 1024], pretrained=[2048, 1024]
+  ...
+```
+
+`strict=False` only requires parameter names and shapes to match, so you can deliberately change
+settings that carry no weights, such as RoPE scaling to extend the context. Weights are read straight
+from the `*.safetensors` files, without instantiating the HF model. Sliding-window layers (Mistral, and
+Qwen2/Qwen3 `layer_types`) become `SlidingWindowAttention` blocks.
 
 Example configs in `configs/`: `llama_like.py`, `gdn_hybrid.py` (3:1 GDN/attention),
 `jamba_like.py` (Mamba2 + attention + MoE), `moe.py` (MLA + shared-expert MoE) and
@@ -186,6 +205,15 @@ dataset type built for another objective is rejected.
   come from that checkpoint unless you override them, so stages chain:
   `tinystories_gdn.py` → `gsm8k_sft.py` → `gsm8k_grpo.py` or `ultrafeedback_dpo.py`, all in
   `configs/train/`.
+- **Starting from HF weights:** `pretrained='Qwen/Qwen3-0.6B-Base'` (a Hub id or local HF directory,
+  or `dict(path=..., revision=..., strict=True)`) loads Llama, Mistral, Qwen2 or Qwen3 weights. With a
+  full `model` section, training starts only if that config matches the checkpoint's architecture
+  (see `load_hf_weights` above). Without one, the architecture comes from the checkpoint's
+  `config.json`, and a partial section such as `model = dict(grad_checkpointing=True)` adds settings
+  on top. `vocab_size='auto'` takes the checkpoint's vocabulary and the tokenizer defaults to the
+  checkpoint's own. `--dry-run` downloads the weights and runs the check without training. Example:
+  `configs/train/qwen3_0p6b_gsm8k_sft.py`. `configs/train/qwen3_0p6b.py` is the same architecture
+  trained from scratch.
 
 ### More details
 
@@ -237,8 +265,13 @@ pytest -q
 
 - **Reference parity:** the Llama-style model matches HF `LlamaForCausalLM` logits in float64
   (GQA, MHA with tied embeddings, and llama3 RoPE scaling), and greedy generation matches token
-  for token. The torch GDN kernel matches `fla`, and the chunked GDN and SSD kernels match their
-  sequential recurrences.
+  for token. Imported Qwen3 (QK-norm, `head_dim` ≠ `dim / heads`, tied), Qwen2 (q/k/v bias, mixed
+  sliding-window layers) and Mistral (sliding window) models match HF logits in float64 too, and the
+  real `Qwen/Qwen3-0.6B` matches exactly. The torch GDN kernel matches `fla`, and the chunked GDN and
+  SSD kernels match their sequential recurrences.
+- **Architecture checks:** equivalent configs written differently compare equal, every kind of
+  difference is reported, mismatched configs are refused in `load_hf_weights` and in experiments,
+  and `strict=False` still refuses wrong parameter shapes.
 - **Cache consistency:** for every mixer, a parallel forward equals token-by-token decoding and
   equals chunked prefill followed by decoding, at the mixer level and in a hybrid model.
 - **Hybrid smoke test:** a model with every mixer plus MoE runs forward and backward (every

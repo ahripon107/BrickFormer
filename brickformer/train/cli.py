@@ -30,6 +30,9 @@ def main(argv: list[str] | None = None) -> None:
     seq_len = cfg["data"]["train"].get("seq_len") or cfg["data"]["train"].get("max_len", 2048)
     data_type = exp.config["data"]["train"].get("type", exp.objective.default_dataset)
     print(f"objective: {exp.objective.name} | train data: {data_type}")
+    if exp.config.get("pretrained"):
+        src = exp.config["pretrained"]
+        print(f"pretrained weights: {src if isinstance(src, str) else src['path']} (architecture matches)")
     print(summary(exp.model, seq_len))
     if args.dry_run:
         print(json.dumps(exp.config, indent=2, default=str))

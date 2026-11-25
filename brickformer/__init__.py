@@ -18,7 +18,7 @@ from .registry import (
     Registry,
     build_model,
 )
-from .utils import count_params, estimate_flops, summary
+from .utils import ArchitectureMismatch, architecture_diff, count_params, estimate_flops, summary
 
 __version__ = "0.1.0"
 
@@ -27,5 +27,5 @@ __all__ = [
     "RUNNERS", "OBJECTIVES", "REWARDS", "build_model", "apply_overrides",
     "Block", "CausalLM", "CausalLMOutput", "ModelCache", "generate", "sample_next",
     "load_config", "dump_config", "build_from_file", "save_pretrained", "load_pretrained",
-    "count_params", "estimate_flops", "summary",
+    "count_params", "estimate_flops", "summary", "architecture_diff", "ArchitectureMismatch",
 ]
