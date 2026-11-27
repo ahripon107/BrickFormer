@@ -66,7 +66,9 @@ if Trainer is not None:
             return loss.detach(), None, None
 
         def log(self, logs: dict, start_time=None) -> None:
-            for mode, key, prefix in (("train", "loss", ""), ("eval", "eval_loss", "eval_")):
+            # eval_loss, or eval_<name>_loss for named validation sets (data.val=dict(web=..., ...))
+            eval_key = next((k for k in logs if k.startswith("eval_") and k.endswith("loss")), None)
+            for mode, key, prefix in (("train", "loss", ""), ("eval", eval_key, eval_key and eval_key[:-4])):
                 if key in logs and self._metrics[mode]:
                     for name, values in self._metrics[mode].items():
                         logs[prefix + name] = round(torch.stack(values).mean().item(), 6)
@@ -158,7 +160,8 @@ class HFTrainer:
         )
         trainer.train(resume_from_checkpoint=self._resume_path())
         trainer.save_model(self.output_dir)
-        already_evaluated = any("eval_loss" in h and h.get("step") == trainer.state.global_step
+        already_evaluated = any(h.get("step") == trainer.state.global_step
+                                and any(k.startswith("eval_") and k.endswith("loss") for k in h)
                                 for h in trainer.state.log_history)
         if eval_dataset is not None and not already_evaluated:
             trainer.evaluate()

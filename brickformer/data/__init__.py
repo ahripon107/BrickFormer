@@ -10,10 +10,12 @@ from .datasets import (
     PromptDataset,
     SFTDataset,
 )
+from .mixture import MixturePretrainDataset, MixtureSchedule
 from .tokenizers import ByteTokenizer, HFTokenizer
 
 __all__ = [
     "ByteTokenizer", "HFTokenizer", "PretrainDataset", "HFTextDataset", "SFTDataset", "PreferenceDataset",
-    "PromptDataset", "PackedStream", "CausalLMCollator", "PreferenceCollator", "PromptCollator",
+    "PromptDataset", "MixturePretrainDataset", "MixtureSchedule",
+    "PackedStream", "CausalLMCollator", "PreferenceCollator", "PromptCollator",
     "default_chat_template", "tokenize_conversation", "split_prompt_response", "encode_prompt",
 ]

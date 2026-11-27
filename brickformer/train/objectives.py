@@ -49,7 +49,20 @@ class Objective:
         ref.eval().requires_grad_(False)
         return ref
 
+    source_names: list[str] | None = None  # set by the experiment for a MixturePretrainDataset
+
+    def record_mixture(self, trainer, source_ids: torch.Tensor) -> None:
+        """Logs each source's share of the training rows as ``mix/<name>``."""
+        if not trainer.model.training:
+            return
+        names = self.source_names or [str(i) for i in range(int(source_ids.max()) + 1)]
+        for i, name in enumerate(names):
+            trainer.record(f"mix/{name}", (source_ids == i).float().mean())
+
     def compute_loss(self, trainer, model, inputs) -> torch.Tensor:
+        source_ids = inputs.pop("source_ids", None)
+        if source_ids is not None:
+            self.record_mixture(trainer, source_ids)
         out = model(**inputs)
         if out.aux_loss is not None:
             trainer.record("aux_loss", out.aux_loss)

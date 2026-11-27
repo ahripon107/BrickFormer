@@ -15,6 +15,7 @@ All of them load Hub datasets (``path='openai/gsm8k'``) or local files (``path='
 from __future__ import annotations
 
 import itertools
+import random
 from typing import Any
 
 import torch
@@ -40,6 +41,54 @@ def load_split(path: str, name: str | None = None, split: str = "train", data_fi
     if max_samples is not None and not streaming:
         ds = ds.select(range(min(max_samples, len(ds))))
     return ds
+
+
+class ShuffledStream:
+    """A streaming split shuffled by file order and a document buffer, reshuffled per epoch.
+
+    Used instead of ``datasets.IterableDataset.shuffle``: on a stream of many parquet files that
+    shuffles row groups across every file and held 5-6 GB of RAM for 13 FineWeb-Edu shards before the
+    first example (datasets 5.2), versus 0.7 GB streamed in order. Here the ``data_files`` list is
+    shuffled (when it is a list; a single file, a pattern or a split dict keeps its order), streamed
+    in that order, and documents pass through a ``buffer_size`` shuffle buffer.
+    """
+
+    def __init__(self, path: str, name: str | None = None, split: str = "train", data_files=None,
+                 buffer_size: int = 10_000, seed: int = 42, load_kwargs: dict | None = None):
+        if buffer_size < 1:
+            raise ValueError(f"buffer_size must be >= 1, got {buffer_size}")
+        self.path, self.name, self.split, self.load_kwargs = path, name, split, load_kwargs
+        self.data_files = [data_files] if isinstance(data_files, str) else data_files
+        self.buffer_size, self.seed, self.epoch = buffer_size, seed, 0
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = random.Random(f"{self.seed}-{self.epoch}")
+        files = self.data_files
+        if isinstance(files, (list, tuple)):
+            files = list(files)
+            rng.shuffle(files)
+        ds = load_split(self.path, self.name, self.split, files, True, None, self.load_kwargs)
+        buf: list = []
+        for ex in ds:
+            if len(buf) < self.buffer_size:
+                buf.append(ex)
+                continue
+            i = rng.randrange(self.buffer_size)
+            yield buf[i]
+            buf[i] = ex
+        rng.shuffle(buf)
+        yield from buf
+
+
+def load_stream(path: str, name: str | None = None, split: str = "train", data_files=None,
+                shuffle_buffer: int | None = None, seed: int = 42, load_kwargs: dict | None = None):
+    """A streaming split, shuffled with :class:`ShuffledStream` when ``shuffle_buffer`` is set."""
+    if shuffle_buffer:
+        return ShuffledStream(path, name, split, data_files, shuffle_buffer, seed, load_kwargs)
+    return load_split(path, name, split, data_files, True, None, load_kwargs)
 
 
 def _objectives(*names: str):
@@ -110,11 +159,10 @@ def PretrainDataset(path: str, tokenizer, seq_len: int, name: str | None = None,
     it), or a torch ``IterableDataset`` when ``streaming=True`` (tokenized on the fly, shuffled with a
     ``shuffle_buffer``-sized buffer; the Trainer then needs ``max_steps``).
     """
-    ds = load_split(path, name, split, data_files, streaming, max_samples, load_kwargs)
     if streaming:
-        if shuffle_buffer:
-            ds = ds.shuffle(seed=seed, buffer_size=shuffle_buffer)
+        ds = load_stream(path, name, split, data_files, shuffle_buffer, seed, load_kwargs)
         return PackedStream(ds, tokenizer, text_field, seq_len, packing, max_samples)
+    ds = load_split(path, name, split, data_files, streaming, max_samples, load_kwargs)
 
     eos = tokenizer.eos_token_id
 
@@ -256,7 +304,10 @@ class CausalLMCollator:
     def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
         seqs = [list(map(int, f["input_ids"])) for f in features]
         labels = [list(map(int, f["labels"])) if "labels" in f else s for f, s in zip(features, seqs)]
-        return _pad(seqs, labels, self.pad_token_id)
+        batch = _pad(seqs, labels, self.pad_token_id)
+        if "source" in features[0]:  # MixturePretrainDataset: which source each row came from (logged)
+            batch["source_ids"] = torch.tensor([int(f["source"]) for f in features])
+        return batch
 
 
 class PreferenceCollator:

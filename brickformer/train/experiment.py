@@ -25,6 +25,8 @@ DPO or GRPO.
 from __future__ import annotations
 
 import copy
+import inspect
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -100,6 +102,25 @@ def _dataset_cfg(data_cfg: dict, objective: Objective) -> dict:
     return data_cfg
 
 
+def _is_named_sets(val: dict) -> bool:
+    return isinstance(val, dict) and bool(val) and "type" not in val and "path" not in val \
+        and all(isinstance(v, dict) for v in val.values())
+
+
+def _with_run_length(data_cfg: dict, train_cfg: dict) -> dict:
+    """Datasets that take ``total_blocks`` (mixture schedules in fractions of training) get the run
+    length in ``seq_len`` blocks: max_steps x batch x grad accumulation x world size."""
+    params = inspect.signature(DATASETS.get(data_cfg["type"])).parameters
+    if "total_blocks" not in params or data_cfg.get("total_blocks") is not None:
+        return data_cfg
+    steps = train_cfg.get("max_steps")
+    if steps is None or steps <= 0:
+        return data_cfg
+    world = int(os.environ.get("WORLD_SIZE", 1))
+    blocks = steps * train_cfg.get("per_device_train_batch_size", 8) * train_cfg.get("gradient_accumulation_steps", 1)
+    return dict(data_cfg, total_blocks=blocks * world)
+
+
 @dataclass
 class Experiment:
     config: dict  # fully resolved (model and tokenizer filled in); saved with every checkpoint
@@ -147,12 +168,22 @@ def build_experiment(cfg: dict, build_data: bool = True) -> Experiment:
     unknown = set(cfg["data"]) - {"train", "val"}
     if unknown:
         raise KeyError(f"data section accepts 'train' and 'val', got {sorted(unknown)}")
-    train_cfg = _dataset_cfg(cfg["data"]["train"], objective)
-    val_cfg = _dataset_cfg(cfg["data"]["val"], objective) if cfg["data"].get("val") is not None else None
+    train_cfg = _with_run_length(_dataset_cfg(cfg["data"]["train"], objective), cfg["train"])
+    val = cfg["data"].get("val")
+    if val is None:
+        val_cfg = None
+    elif _is_named_sets(val):  # val=dict(web=dict(...), math=dict(...)) -> eval_web_loss, eval_math_loss
+        val_cfg = {name: _dataset_cfg(v, objective) for name, v in val.items()}
+    else:
+        val_cfg = _dataset_cfg(val, objective)
     train_ds = eval_ds = None
     if build_data:
         train_ds = DATASETS.build(train_cfg, tokenizer=tokenizer)
-        eval_ds = DATASETS.build(val_cfg, tokenizer=tokenizer) if val_cfg is not None else None
+        if isinstance(val_cfg, dict) and "type" not in val_cfg:
+            eval_ds = {name: DATASETS.build(v, tokenizer=tokenizer) for name, v in val_cfg.items()}
+        elif val_cfg is not None:
+            eval_ds = DATASETS.build(val_cfg, tokenizer=tokenizer)
+        objective.source_names = getattr(train_ds, "source_names", None)
     runner = RUNNERS.build(cfg["train"])
     return Experiment(cfg, objective, model, tokenizer, train_ds, eval_ds, runner)
 
