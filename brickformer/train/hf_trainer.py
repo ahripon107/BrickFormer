@@ -14,6 +14,7 @@ overrides what the Trainer only knows for HF ``PreTrainedModel`` checkpoints:
 
 from __future__ import annotations
 
+import json
 import os
 from collections import defaultdict
 from pathlib import Path
@@ -24,7 +25,7 @@ from ..config import dump_config, save_pretrained
 from ..registry import RUNNERS
 
 try:
-    from transformers import Trainer, TrainingArguments
+    from transformers import Trainer, TrainerCallback, TrainingArguments
     from transformers.trainer_utils import get_last_checkpoint
 except ImportError:  # pragma: no cover - exercised only without transformers
     Trainer = None
@@ -104,6 +105,37 @@ if Trainer is not None:
         def _load_best_model(self) -> None:
             self._load_weights(self.state.best_model_checkpoint)
 
+    class BenchmarkCallback(TrainerCallback):
+        """Runs a :class:`~brickformer.evaluation.BenchmarkSuite` every ``every`` optimizer steps
+        (0: never during training) and once at the end; logs ``bench/*`` through the trainer and
+        appends each result to ``<output_dir>/benchmarks.jsonl``. Only the main process evaluates."""
+
+        def __init__(self, trainer: BrickTrainer, suite, every: int):
+            self.trainer, self.suite, self.every = trainer, suite, every
+            self.last_step = None
+
+        def run(self, state) -> None:
+            if self.last_step == state.global_step:
+                return
+            self.last_step = state.global_step
+            if not self.trainer.is_world_process_zero():
+                return
+            args = self.trainer.args
+            dtype = torch.bfloat16 if args.bf16 else torch.float16 if args.fp16 else None
+            model = self.trainer.accelerator.unwrap_model(self.trainer.model)
+            results = self.suite.evaluate(model, self.trainer.bf_tokenizer, autocast_dtype=dtype)
+            self.trainer.log(dict(results))
+            Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+            with open(Path(args.output_dir) / "benchmarks.jsonl", "a") as f:
+                f.write(json.dumps({"step": state.global_step, **results}) + "\n")
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if self.every and state.global_step % self.every == 0:
+                self.run(state)
+
+        def on_train_end(self, args, state, control, **kwargs):
+            self.run(state)
+
 
 @RUNNERS.register_module()
 class HFTrainer:
@@ -146,18 +178,26 @@ class HFTrainer:
         return r or None
 
     def run(self, model, tokenizer, train_dataset, eval_dataset=None, objective=None,
-            experiment_config: dict | None = None):
+            experiment_config: dict | None = None, benchmarks=None):
+        """``benchmarks``: an optional :class:`~brickformer.evaluation.BenchmarkSuite`, run every
+        ``benchmarks.every`` steps (default: ``eval_steps``, if set) and at the end of training."""
         if objective is None:
             from .objectives import build_objective
 
             objective = build_objective("pretrain")
         # the reference is the starting policy, so build it before any checkpoint is resumed
         ref_model = objective.build_ref_model(model) if objective.needs_ref_model else None
+        args = self.make_args(eval_dataset is not None)
         trainer = BrickTrainer(
-            model=model, args=self.make_args(eval_dataset is not None), train_dataset=train_dataset,
+            model=model, args=args, train_dataset=train_dataset,
             eval_dataset=eval_dataset, data_collator=objective.collator(tokenizer), objective=objective,
             tokenizer=tokenizer, ref_model=ref_model, experiment_config=experiment_config,
         )
+        if benchmarks is not None:
+            every = benchmarks.every
+            if every is None:
+                every = int(args.eval_steps) if args.eval_strategy != "no" and args.eval_steps else 0
+            trainer.add_callback(BenchmarkCallback(trainer, benchmarks, every))
         trainer.train(resume_from_checkpoint=self._resume_path())
         trainer.save_model(self.output_dir)
         already_evaluated = any(h.get("step") == trainer.state.global_step

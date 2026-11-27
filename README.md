@@ -243,6 +243,38 @@ the time, but a 52M-param story model almost never gets the number right.
 `ultrafeedback_dpo.py` also runs from the SFT checkpoint. On real tasks these are integration
 checks, not quality results.
 
+### Benchmarks
+
+A `benchmarks` section runs zero-shot benchmarks during training, every `eval_steps` (or
+`every=N` steps) and once at the end:
+
+```python
+benchmarks = dict(
+    tasks=['hellaswag', 'arc_easy', 'arc_challenge', 'piqa', 'winogrande', 'lambada'],
+    max_samples=500,      # per task: a fixed random subset, the same at every evaluation; None = full split
+    batch_tokens=4096,    # tokens per forward pass; logits take about batch_tokens x vocab x 2 bytes
+)
+```
+
+Results are logged as `bench/<task>_<metric>` (`acc`, `acc_norm`, LAMBADA `ppl`), plus `bench/avg`,
+the mean of each task's headline metric. They are also appended to `<output_dir>/benchmarks.jsonl`.
+Available tasks: `hellaswag`, `arc_easy`, `arc_challenge`, `piqa`, `winogrande`, `openbookqa`,
+`sciq`, `boolq`, `lambada`, and `mmlu` (5-shot). For the released Qwen3-0.6B-Base, MMLU 5-shot
+scores 52.63, compared with 52.52 from lm-eval and 52.81 in the Qwen3 report. Choices are scored by log-likelihood with lm-evaluation-harness's
+prompts and tokenization. On Qwen2.5-0.5B (full splits, bf16), the results agree with lm-eval
+0.4.13 to within 0.2 points. WinoGrande is the exception at 0.7, and bf16 vs fp32 alone moves it
+by 0.5. Add your own task by registering a `Benchmark` subclass in `bf.registry.BENCHMARKS`.
+
+On the 0.6B mixture config (RTX 5070 Ti), 500 examples × 6 tasks take about 11 s per run, and GPU
+memory peaks at 13.0 GiB reserved, compared with 12.5 GiB for training alone.
+
+To score a finished checkpoint, or an HF model, on full splits:
+
+```bash
+brickformer-eval runs/qwen3_0p6b_mixture
+brickformer-eval --hf Qwen/Qwen2.5-0.5B --tasks hellaswag,piqa --max-samples 1000
+```
+
 ### Minimal training script
 
 `examples/train_tiny.py` is a dependency-free loop, about 150 lines, on character-level

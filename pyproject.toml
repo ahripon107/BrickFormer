@@ -38,6 +38,7 @@ dev = ["pytest", "ruff", "pyyaml", "transformers>=4.46", "accelerate>=1.0", "dat
 
 [project.scripts]
 brickformer-train = "brickformer.train.cli:main"
+brickformer-eval = "brickformer.evaluation.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["brickformer*"]

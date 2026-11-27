@@ -61,6 +61,16 @@ data = dict(
     ),
 )
 
+# zero-shot benchmarks every eval_steps and at the end: bench/<task>_<metric>, bench/avg, and
+# runs/qwen3_0p6b_mixture/benchmarks.jsonl. A fixed 500-example subset per task keeps a run to about a
+# minute; score the final checkpoint on full splits with `brickformer-eval runs/qwen3_0p6b_mixture`.
+# batch_tokens=2048: eval logits (2048 x 152k vocab, bf16) take ~0.6 GB next to the ~12.5 GB training peak.
+benchmarks = dict(
+    tasks=["hellaswag", "arc_easy", "arc_challenge", "piqa", "winogrande", "lambada"],
+    max_samples=500,
+    batch_tokens=2048,
+)
+
 train = dict(
     type="HFTrainer",
     output_dir="runs/qwen3_0p6b_mixture",

@@ -63,6 +63,7 @@ DATASETS = Registry("datasets")
 RUNNERS = Registry("runners")
 OBJECTIVES = Registry("objectives")
 REWARDS = Registry("rewards")
+BENCHMARKS = Registry("benchmarks")
 
 
 def build_model(cfg: dict) -> Any:

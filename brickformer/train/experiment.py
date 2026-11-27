@@ -7,6 +7,11 @@
     tokenizer = dict(type='HFTokenizer', name='gpt2')        # optional with init_from / pretrained
     data = dict(train=dict(path=..., ...), val=dict(...))    # dataset type defaults from the objective
     train = dict(type='HFTrainer', output_dir='runs/x', ...)
+    benchmarks = dict(tasks=['hellaswag', 'arc_easy', 'piqa'], max_samples=500)  # optional, see below
+
+``benchmarks`` runs zero-shot benchmarks (HellaSwag, ARC, PIQA, WinoGrande, OpenBookQA, SciQ, BoolQ,
+LAMBADA) every ``eval_steps`` and at the end, logged as ``bench/<task>_<metric>``; see
+:class:`brickformer.evaluation.BenchmarkSuite`.
 
 Typical chain: pretrain -> ``init_from`` the pretrain run for SFT -> ``init_from`` the SFT run for
 DPO or GRPO.
@@ -130,10 +135,12 @@ class Experiment:
     train_dataset: Any
     eval_dataset: Any
     runner: Any
+    benchmarks: Any = None  # BenchmarkSuite from the ``benchmarks`` section, if any
 
     def run(self):
+        kwargs = dict(benchmarks=self.benchmarks) if self.benchmarks is not None else {}
         return self.runner.run(self.model, self.tokenizer, self.train_dataset, self.eval_dataset,
-                               objective=self.objective, experiment_config=self.config)
+                               objective=self.objective, experiment_config=self.config, **kwargs)
 
 
 def build_experiment(cfg: dict, build_data: bool = True) -> Experiment:
@@ -184,8 +191,15 @@ def build_experiment(cfg: dict, build_data: bool = True) -> Experiment:
         elif val_cfg is not None:
             eval_ds = DATASETS.build(val_cfg, tokenizer=tokenizer)
         objective.source_names = getattr(train_ds, "source_names", None)
+    benchmarks = None
+    if cfg.get("benchmarks"):
+        from ..evaluation import BenchmarkSuite
+
+        benchmarks = BenchmarkSuite(**cfg["benchmarks"])
+        if build_data:
+            benchmarks.load()  # download now: a bad task fails before training starts
     runner = RUNNERS.build(cfg["train"])
-    return Experiment(cfg, objective, model, tokenizer, train_ds, eval_ds, runner)
+    return Experiment(cfg, objective, model, tokenizer, train_ds, eval_ds, runner, benchmarks)
 
 
 def run_experiment(cfg: dict):

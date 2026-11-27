@@ -26,7 +26,7 @@ def sources(tmp_path):
 
 def _letters(ds, n):
     out = []
-    for i, ex in zip(range(n), ds):
+    for _, ex in zip(range(n), ds):
         text = bytes(t for t in ex["input_ids"].tolist() if t < 256).decode()
         letter = next(c for c in text if c in "wmc")
         assert ds.source_names[ex["source"]][0] == letter  # the source index matches the content
